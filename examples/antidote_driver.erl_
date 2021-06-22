@@ -1,4 +1,4 @@
--module(rkv_driver).
+-module(antidote_driver).
 -behaviour(rcl_bench_driver).
 
 -export([new/1, run/4, terminate/2]).
@@ -8,30 +8,28 @@
          random_seed/0, shutdown_on_error/0]).
 
 new(Id) ->
-    Node = list_to_atom("rkv@127.0.0.1"),
-    State = #{id => Id, node => Node, existing => #{}, mod => 'Elixir.Rkv'},
-    {ok, State}.
+    io:format(user, "init~n", []),
+    {ok, state}.
 
-run(get, KeyGen, _ValueGen, #{node := Node, mod := Mod} = State) ->
-    Key = KeyGen(),
-    {_, _} = rpc:call(Node, Mod, get, [Key]),
-    {ok, State};
-run(put, KeyGen, ValueGen, #{existing := Existing, node := Node, mod := Mod} = State) ->
-    Key = KeyGen(),
-    Value = ValueGen(),
-    ok = rpc:call(Node, Mod, put, [Key, Value]),
-    {ok, State#{existing := Existing#{Key => true}}};
-run(get_own_puts, _KeyGen, _ValueGen, #{existing := Existing} = State)
-  when map_size(Existing) =:= 0 ->
-    {ok, State};
-run(get_own_puts, _KeyGen, _ValueGen, #{existing := Existing, node := Node, mod := Mod} = State) ->
-    Max = maps:size(Existing),
-    Take = rand:uniform(Max),
-    {Key, _} = lists:nth(Take, maps:to_list(Existing)),
-    {ok, _} = rpc:call(Node, Mod, get, [Key]),
-    {ok, State}.
+run(get, KeyGen, _ValueGen, State) ->
+    io:format(user, "get~n", []),
+    {ok, state};
+run(put, KeyGen, ValueGen, State) ->
+    io:format(user, "put~n", []),
+    {ok, state};
+run(get_own_puts, _KeyGen, _ValueGen, State) ->
+    io:format(user, "get_own_puts~n", []),
+    {ok, state}.
 
 terminate(_, _) -> ok.
+
+
+
+
+
+
+
+
 
 % config callbacks
 

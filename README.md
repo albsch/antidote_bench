@@ -24,3 +24,7 @@ R
 > install.packages("scales")
 > install.packages("lubridate")
 ```
+
+## How to use
+
+* Copy example driver

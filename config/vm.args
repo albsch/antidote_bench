@@ -1,5 +1,5 @@
 ## Name of the node
--name runner@127.0.0.1
+-name antidote_bench@127.0.0.1
 
 ## Cookie for distributed erlang
 -setcookie rcl-bench-cookie
