@@ -232,21 +232,6 @@ worker_next_op(State) ->
             State#state.shutdown_on_error andalso
                 rcl_bench_util:exit("(~p) shutdown on error", [1]),
             {ok, State#state{driver_state = DriverState}};
-        {'EXIT', Reason} ->
-            %% Driver crashed, generate a crash error and terminate. This will take down
-            %% the corresponding worker which will get restarted by the appropriate supervisor.
-            rcl_bench_stats:op_complete(Next, {error, crash}, ElapsedUs),
-
-            %% Give the driver a chance to cleanup
-            catch DriverMod:terminate({'EXIT', Reason}, State#state.driver_state),
-
-            logger:warning("Driver crashed: ~p", [Reason]),
-            case State#state.shutdown_on_error of
-                true ->
-                    rcl_bench_util:exit("(~p) shutdown on error", [2]);
-                false ->
-                    crash
-            end;
         {stop, Reason} ->
             logger:notice("Driver (~p) has requested stop: ~p", [self(), Reason]),
             %% Give the driver a chance to cleanup

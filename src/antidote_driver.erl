@@ -31,12 +31,12 @@ antidote_types() -> dict:from_list([{antidote_crdt_counter_pn, [{increment,1}, {
 set_size() -> 10.
 
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%% for transacitons %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%% for transactions %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The following parameters are used when issuing transactions.
 %% When running append and read operations, they are ignored.
 
 %% Number of reads; update_only_txn ignores it.
-num_reads() -> 10.
+%num_reads() -> 10.
 %% Number of updates; read_only_txn ignores it.
 num_updates() -> 10.
 
@@ -46,12 +46,13 @@ num_updates() -> 10.
 %% when set to false, all (num_reads) reads will be sent
 %% in a single read_objects call, which is faster, as
 %% antidote will process them in parallel.
-sequential_reads() -> false.
+%sequential_reads() -> false.
 
 %% Idem for updates
+-spec sequential_writes() -> false | true.
 sequential_writes() -> false.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%% end for transacitons %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%% end for transactions %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -define(BUCKET, <<"antidote_bench_bucket">>).
 
@@ -85,13 +86,13 @@ new(Id) ->
 %% parameter in the config file.
 run(update_only_txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, worker_id=Id, commit_time=OldCommitTime})->
   try
-    {ok, {static, {TimeStamp, TxnProperties}}} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, true}]),
+    {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, true}]),
     UpdateIntKeys = generate_keys(num_updates(), KeyGen),
     BObjs = multi_get_random_param_new(UpdateIntKeys, antidote_types(), ValueGen(), undefined, set_size()),
-    ok = create_update_operations(Pid, BObjs, {static, {TimeStamp, TxnProperties}}, sequential_writes()),
-    {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, {static, {TimeStamp, TxnProperties}}),
+    ok = create_update_operations(Pid, BObjs, TxId, sequential_writes()),
+    {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, TxId),
     {ok, State#state{commit_time=BCommitTime}}
-  catch _:R:S  -> {error, {R, S}, State}
+  catch _:R:S  -> {error, {Id, R, S}, State}
   end.
 
 terminate(_, _) -> ok.

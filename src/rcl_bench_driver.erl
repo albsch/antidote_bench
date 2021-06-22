@@ -8,7 +8,7 @@
 -type command() :: term().
 -type keygen() :: term().
 -type valuegen() :: term().
--type error() :: {error, term()}.
+-type error() :: {error, term(), state()}.
 -type mode_config() :: term().
 -type key_generator_config() :: term().
 -type value_generator_config() :: term().
@@ -16,7 +16,10 @@
 -type random_seed_value() :: term().
 
 -callback new(term()) -> {ok, state()}.
--callback run(command(), keygen(), valuegen(), state()) -> {ok, state()} | error().
+-callback run(command(), keygen(), valuegen(), state()) ->
+    {ok | silent, state()}
+    | {'stop', term()}
+    | error().
 -callback terminate(term(), state()) -> ok.
 -callback mode() -> {ok, mode_config()}.
 -callback concurrent_workers() -> {ok, pos_integer()}.
