@@ -7,10 +7,11 @@
          key_generator/0, value_generator/0, random_algorithm/0,
          random_seed/0, shutdown_on_error/0, crash_is_recoverable/0]).
 % generic config 
-mode() -> {ok, {rate, max}}.
-concurrent_workers() -> {ok, 2}.
+mode() -> {ok, {rate, 5}}.
+concurrent_workers() -> {ok, 1}.
 duration() -> {ok, 1}.
 operations() -> {ok, [{txn, 1}]}.
+%operations() -> {ok, [{txn, 1}]}.
 test_dir() -> {ok, "tests"}.
 key_generator() -> {ok, {uniform_int, 100000}}.
 value_generator() -> {ok, {fixed_bin, 100}}.
@@ -60,7 +61,6 @@ sequential_writes() -> false.
 -record(state, {worker_id,
                 time,
                 pb_pid,
-                last_read,
                 commit_time,
                 num_reads,
                 num_updates
@@ -82,8 +82,7 @@ new(Id) ->
     worker_id = Id,
     time = {1, 1, 1},
     pb_pid = Pid,
-    last_read = {undefined, undefined},
-    commit_time = ignore,
+    commit_time = term_to_binary(ignore),
     num_reads = num_reads(),
     num_updates = num_updates()
   }}.
@@ -125,16 +124,13 @@ run(txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, worker_id=Id, commit_time=Ol
   , num_reads = NumReads, num_updates = NumUpdates }) ->
 
   {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, false}]),
+
   {_ReadResult, IntKeys} = case NumReads > 0 of
                             true ->
                               IntegerKeys = generate_keys(NumReads, KeyGen),
                               BoundObjects = [{list_to_binary(integer_to_list(K)), get_key_type(K, antidote_types()), ?BUCKET} || K <- IntegerKeys],
-                              case create_read_operations(Pid, BoundObjects, TxId, sequential_reads()) of
-                                {ok, RS} ->
-                                  {RS, IntegerKeys};
-                                Error ->
-                                  {{error, {Id, Error}, State}, IntegerKeys}
-                              end;
+                              {ok, RS} = create_read_operations(Pid, BoundObjects, TxId, sequential_reads()),
+                              {RS, IntegerKeys};
                             false ->
                               {no_reads, no_reads}
                           end,
@@ -150,7 +146,7 @@ run(txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, worker_id=Id, commit_time=Ol
 
   BObjs = multi_get_random_param_new(UpdateIntKeys, antidote_types(), ValueGen(), undefined, set_size()),
   ok = create_update_operations(Pid, BObjs, TxId, sequential_writes()),
-  {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, {interactive, TxId}),
+  {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, TxId),
   {ok, State#state{commit_time = BCommitTime}};
 
 %% @doc the append command will run a transaction with a single update, and no reads.
