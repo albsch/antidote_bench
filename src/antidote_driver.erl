@@ -5,18 +5,19 @@
 
 -export([mode/0, concurrent_workers/0, duration/0, operations/0, test_dir/0,
          key_generator/0, value_generator/0, random_algorithm/0,
-         random_seed/0, shutdown_on_error/0]).
+         random_seed/0, shutdown_on_error/0, crash_is_recoverable/0]).
 % generic config 
 mode() -> {ok, {rate, max}}.
 concurrent_workers() -> {ok, 2}.
 duration() -> {ok, 1}.
-operations() -> {ok, [{update_only_txn, 1}]}.
+operations() -> {ok, [{txn, 1}]}.
 test_dir() -> {ok, "tests"}.
 key_generator() -> {ok, {uniform_int, 100000}}.
 value_generator() -> {ok, {fixed_bin, 100}}.
 random_algorithm() -> {ok, exsss}.
 random_seed() -> {ok, {1,4,3}}.
 shutdown_on_error() -> false.
+crash_is_recoverable() -> true.
 
 % antidote config 
 %%{operations, [{update_only_txn, 1}, {read_only_txn, 1}, {append, 1}, {read, 1}, {txn, 1} ]}.
@@ -36,7 +37,7 @@ set_size() -> 10.
 %% When running append and read operations, they are ignored.
 
 %% Number of reads; update_only_txn ignores it.
-%num_reads() -> 10.
+num_reads() -> 10.
 %% Number of updates; read_only_txn ignores it.
 num_updates() -> 10.
 
@@ -46,7 +47,7 @@ num_updates() -> 10.
 %% when set to false, all (num_reads) reads will be sent
 %% in a single read_objects call, which is faster, as
 %% antidote will process them in parallel.
-%sequential_reads() -> false.
+sequential_reads() -> false.
 
 %% Idem for updates
 -spec sequential_writes() -> false | true.
@@ -60,7 +61,9 @@ sequential_writes() -> false.
                 time,
                 pb_pid,
                 last_read,
-                commit_time
+                commit_time,
+                num_reads,
+                num_updates
                 }).
 
 new(Id) ->
@@ -71,12 +74,18 @@ new(Id) ->
   {ok, Pid} = antidotec_pb_socket:start_link(antidote_pb_ip(), antidote_pb_port()),
   io:format(user, "Connection established", []),
 
+  % some sanity checks
+  true = num_reads() > 0,
+  true = num_updates() > 0,
+
   {ok, #state{
     worker_id = Id,
     time = {1, 1, 1},
     pb_pid = Pid,
     last_read = {undefined, undefined},
-    commit_time = ignore
+    commit_time = ignore,
+    num_reads = num_reads(),
+    num_updates = num_updates()
   }}.
 
 
@@ -84,21 +93,90 @@ new(Id) ->
 %% by calling the static update_objects interface of antidote.
 %% the number of operations is defined by the {num_updates, x}
 %% parameter in the config file.
-run(update_only_txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, worker_id=Id, commit_time=OldCommitTime})->
-  try
-    {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, true}]),
-    UpdateIntKeys = generate_keys(num_updates(), KeyGen),
-    BObjs = multi_get_random_param_new(UpdateIntKeys, antidote_types(), ValueGen(), undefined, set_size()),
-    ok = create_update_operations(Pid, BObjs, TxId, sequential_writes()),
-    {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, TxId),
-    {ok, State#state{commit_time=BCommitTime}}
-  catch _:R:S  -> {error, {Id, R, S}, State}
-  end.
+run(update_only_txn, _KeyGen, _ValueGen, State=#state{num_updates = NumUpdates}) when NumUpdates =< 0 ->
+  {ok, State};
+run(update_only_txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, commit_time=OldCommitTime, num_updates = NumUpdates})->
+  {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, true}]),
+  UpdateIntKeys = generate_keys(NumUpdates, KeyGen),
+  BObjs = multi_get_random_param_new(UpdateIntKeys, antidote_types(), ValueGen(), undefined, set_size()),
+  ok = create_update_operations(Pid, BObjs, TxId, sequential_writes()),
+  {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, TxId),
+  {ok, State#state{commit_time=BCommitTime}};
+
+%% @doc This transaction will only perform read operations in
+%% an antidote's read/only transaction.
+%% the number of operations is defined by the {num_reads, x}
+%% parameter in the config file.
+run(read_only_txn, _KeyGen, _ValueGen, State=#state{num_reads = NumReads}) when NumReads =< 0 ->
+  {ok, State};
+run(read_only_txn, KeyGen, _ValueGen, State=#state{pb_pid=Pid, commit_time = OldCommitTime}) ->
+  {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, true}]),
+  IntegerKeys = generate_keys(num_reads(), KeyGen),
+  BoundObjects = [{list_to_binary(integer_to_list(K)), get_key_type(K, antidote_types()), ?BUCKET} || K <- IntegerKeys],
+  {ok, _} = create_read_operations(Pid, BoundObjects, TxId, sequential_reads()),
+  {ok, BCommitTime} = antidotec_pb_socket:get_last_commit_time(Pid),
+  {ok, State#state{commit_time = BCommitTime}};
+
+%% @doc A general transaction.
+%% it first performs reads to a number of objects defined by the
+%% {num_reads, X} parameter in the config file.
+%% Then, it updates {num_updates, X}.
+run(txn, KeyGen, ValueGen, State=#state{pb_pid=Pid, worker_id=Id, commit_time=OldCommitTime
+  , num_reads = NumReads, num_updates = NumUpdates }) ->
+
+  {ok, TxId} = antidotec_pb:start_transaction(Pid, OldCommitTime, [{static, false}]),
+  {_ReadResult, IntKeys} = case NumReads > 0 of
+                            true ->
+                              IntegerKeys = generate_keys(NumReads, KeyGen),
+                              BoundObjects = [{list_to_binary(integer_to_list(K)), get_key_type(K, antidote_types()), ?BUCKET} || K <- IntegerKeys],
+                              case create_read_operations(Pid, BoundObjects, TxId, sequential_reads()) of
+                                {ok, RS} ->
+                                  {RS, IntegerKeys};
+                                Error ->
+                                  {{error, {Id, Error}, State}, IntegerKeys}
+                              end;
+                            false ->
+                              {no_reads, no_reads}
+                          end,
+
+  UpdateIntKeys = case IntKeys of
+                    no_reads ->
+                      %% write only transaction
+                      generate_keys(NumUpdates, KeyGen);
+                    _ ->
+                      %% The following selects the latest reads for updating.
+                      lists:sublist(IntKeys, NumReads - NumUpdates + 1, NumUpdates)
+                  end,
+
+  BObjs = multi_get_random_param_new(UpdateIntKeys, antidote_types(), ValueGen(), undefined, set_size()),
+  ok = create_update_operations(Pid, BObjs, TxId, sequential_writes()),
+  {ok, BCommitTime} = antidotec_pb:commit_transaction(Pid, {interactive, TxId}),
+  {ok, State#state{commit_time = BCommitTime}};
+
+%% @doc the append command will run a transaction with a single update, and no reads.
+run(append, KeyGen, ValueGen, State) ->
+  run(txn, KeyGen, ValueGen, State#state{num_reads=0,num_updates=1});
+
+%% @doc the read command will run a transaction with a single read, and no updates.
+run(read, KeyGen, ValueGen, State) ->
+  run(txn, KeyGen, ValueGen, State#state{num_reads=1,num_updates=0}).
 
 terminate(_, _) -> ok.
 
 
 
+
+create_read_operations(Pid, BoundObjects, TxInfo, IsSeq) ->
+  case IsSeq of
+    true->
+      Result = lists:map(fun(BoundObj)->
+        {ok, [Value]} = antidotec_pb:read_objects(Pid, [BoundObj], TxInfo),
+        Value
+                         end,BoundObjects),
+      {ok, Result};
+    false ->
+      antidotec_pb:read_objects(Pid, BoundObjects, TxInfo)
+  end.
 
 create_update_operations(_Pid, [], _TxInfo, _IsSeq) ->
   ok;
