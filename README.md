@@ -9,11 +9,7 @@
 # Generate Graphs
 
 ```
-# ./R/latency.R <op> <csv-path> <image-path>
-./R/latency.R txn current/txn_single.csv latency_txn_single.png
-
-# ./R/throughput.R <op> <csv-path> <image-path>
-./R/throughput.R txn tests/txn_single.csv throughput_txn_single.png
+make results
 ```
 
 
