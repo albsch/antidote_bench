@@ -68,21 +68,16 @@ init([]) ->
 
     logger:notice("Operations: ~p", [Ops]),
     [erlang:put({csv_file, X}, op_csv_file(X, DriverMod)) || X <- Ops],
-    erlang:put(summary_file, op_summary_csv_file(DriverMod)),
+    erlang:put({csv_file, summary_file}, op_summary_csv_file(DriverMod)),
     {ok, #state{ops = Ops, report_interval = ReportInterval}}.
 
 handle_call({op, Op, {error, Reason}, _ElapsedUs}, _From, State) ->
-    increment_error_counter(Op),
-    increment_error_counter({Op, Reason}),
+    ets:update_counter(rcl_bench_errors, Op, [{2,1}], {Op, 0}),
     {reply, ok, State};
-handle_call({write, {Op, Units, ElapsedUs}}, _From, State) ->
-    %Line = io_lib:format("~w, ~w, ~w\n", [os:system_time(millisecond), Units, ElapsedUs]),
+handle_call({write, {Op, Units, _ElapsedUs}}, _From, State) ->
     ets:update_counter(t, Op, [{2,Units}], {Op, 0}),
-%%    File = erlang:get({csv_file, Op}),
-%%    ok = file:write(File, Line),
+    % TODO update latency here
     {reply, ok, State}.
-
-%{noreply, State#state { last_write_time = Now, errors_since_last_report = false }}.
 
 handle_cast(_, State) ->
     {noreply, State}.
@@ -90,26 +85,42 @@ handle_cast(_, State) ->
 handle_info(report, State) ->
     Now = os:timestamp(),
 
-    %% TODO report latency
-
-    %% TODO report single ops, necessary?
-
     Elapsed = timer:now_diff(Now, State#state.start_time) / 1000000,
     Window  = timer:now_diff(Now, State#state.last_write_time) / 1000000,
 
-    {Oks, Errors, OkOpsRes} =
+    {Oks, Errors, _OkOpsRes} =
         lists:foldl(fun(Op, {TotalOks, TotalErrors, OpsResAcc}) ->
-            [{Op, Oks}] = ets:lookup(t, Op),
-            %% TODO report errors
-            {TotalOks + Oks, TotalErrors + 0,
+            Oks = case ets:lookup(t, Op) of
+                [{Op, EtsOks}] -> EtsOks;
+                [] -> 0
+            end,
+            OpErrors = case ets:lookup(rcl_bench_errors, Op) of
+                [{Op, EtsErrs}] -> EtsErrs;
+                [] -> 0
+            end,
+            ets:update_counter(t, Op, {2, -Oks}, {Op, 0}),
+            ets:update_counter(rcl_bench_errors, Op, {2, -OpErrors}, {Op, 0}),
+            ets:update_counter(rcl_bench_total_errors, Op, {2, OpErrors}, {Op, 0}),
+
+            %% write single files
+            %% elapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, errors
+            %% Write summary
+            File = erlang:get({csv_file, Op}),
+            file:write(File,
+                io_lib:format("~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w\n",
+                    [Elapsed,
+                        Window,
+                        Oks,
+                        0,0,0,0,0,0,0,
+                        OpErrors])),
+            
+            %% TODO report total errors
+            {TotalOks + Oks, TotalErrors + OpErrors,
                 [{Op, Oks}|OpsResAcc]}
                     end, {0,0,[]}, State#state.ops),
 
-    %% Reset units
-    [ets:update_counter(t, Op, {2, -OpAmount}) || {Op, OpAmount} <- OkOpsRes],
-
     %% Write summary
-    File = erlang:get(summary_file),
+    File = erlang:get({csv_file, summary_file}),
     file:write(File,
         io_lib:format("~w, ~w, ~w, ~w, ~w\n",
             [Elapsed,
@@ -121,10 +132,11 @@ handle_info(report, State) ->
     {noreply, State#state { last_write_time = Now }}.
 
 terminate(_Reason, State) ->
-    % one last time
+    % report one last time
     handle_info(report, State),
     report_total_errors(State),
 
+    % close files
     [ok = file:close(F) || {{csv_file, _}, F} <- erlang:get()],
     ok.
 
@@ -146,40 +158,11 @@ op_summary_csv_file(DriverMod) ->
 op_csv_file({Label, _Op}, DriverMod) ->
     {ok, TestDir2} = DriverMod:test_dir(),
     TestDir = filename:join(TestDir2, "current"),
-    Fname = filename:join(TestDir, rcl_bench_util:normalize_label(Label) ++ "_single.csv"),
+    Fname = filename:join(TestDir, rcl_bench_util:normalize_label(Label) ++ "_latencies.csv"),
     {ok, F} = file:open(Fname, [raw, binary, write]),
-    ok = file:write(F, <<"timestamp, unit, microseconds\n">>),
+    file:write(F, <<"elapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, errors\n">>),
     F.
 
-increment_error_counter(Key) ->
-    ets_increment(rcl_bench_errors, Key, 1).
-
-ets_increment(Tab, Key, Incr) when is_integer(Incr) ->
-    %% Increment the counter for this specific key. We have to deal with
-    %% missing keys, so catch the update if it fails and init as necessary
-    case catch ets:update_counter(Tab, Key, Incr) of
-        Value when is_integer(Value) ->
-            ok;
-        {'EXIT', _} ->
-            case ets:insert_new(Tab, {Key, Incr}) of
-                true ->
-                    ok;
-                _ ->
-                    %% Race with another load gen proc, so retry
-                    ets_increment(Tab, Key, Incr)
-            end
-    end.
-
-report_total_errors(State) ->
-    case ets:tab2list(rcl_bench_errors) of
-        [] ->
-            logger:notice("No Errors");
-        UnsortedErrCounts ->
-            ErrCounts = lists:sort(UnsortedErrCounts),
-            F =
-                fun ({Key, _Count}) ->
-                        lists:member(Key, State#state.ops)
-                end,
-            ErrorSummary = lists:filter(F, ErrCounts),
-            logger:notice("Total Errors: ~p", [ErrorSummary])
-    end.
+report_total_errors(_State) ->
+    FilteredErrors = lists:filter(fun({_Op, Count}) -> Count > 0 end, ets:tab2list(rcl_bench_total_errors)),
+    logger:warning("Errors: ~p", [FilteredErrors]).
