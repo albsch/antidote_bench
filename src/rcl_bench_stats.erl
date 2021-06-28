@@ -49,8 +49,8 @@ init([]) ->
     %% the start of the run
     ets:new(rcl_bench_total_errors, [protected, named_table]),
 
+    ets:new(t, [set, named_table]),
 
-    T = ets:new(t, [set, named_table]),
 
     {ok, DriverMod} = application:get_env(rcl_bench, driver_module),
     {ok, Operations} = DriverMod:operations(),
@@ -63,6 +63,12 @@ init([]) ->
         end,
     Ops = [F1(X) || X <- Operations],
 
+    %% Setup a histogram for each operation 
+    %% we only track latencies on successful operations
+    [begin
+        rcl_bench_histogram:new_histogram({latencies, Op}, slide, report_interval())
+    end || Op <- Ops],
+
     ReportInterval = timer:seconds(report_interval()),
     timer:send_interval(ReportInterval, report),
 
@@ -71,12 +77,12 @@ init([]) ->
     erlang:put({csv_file, summary_file}, op_summary_csv_file(DriverMod)),
     {ok, #state{ops = Ops, report_interval = ReportInterval}}.
 
-handle_call({op, Op, {error, Reason}, _ElapsedUs}, _From, State) ->
+handle_call({op, Op, {error, _Reason}, _ElapsedUs}, _From, State) ->
     ets:update_counter(rcl_bench_errors, Op, [{2,1}], {Op, 0}),
     {reply, ok, State};
-handle_call({write, {Op, Units, _ElapsedUs}}, _From, State) ->
+handle_call({write, {Op, Units, ElapsedUs}}, _From, State) ->
     ets:update_counter(t, Op, [{2,Units}], {Op, 0}),
-    % TODO update latency here
+    rcl_bench_histogram:notify({latencies, Op}, ElapsedUs),
     {reply, ok, State}.
 
 handle_cast(_, State) ->
@@ -98,6 +104,10 @@ handle_info(report, State) ->
                 [{Op, EtsErrs}] -> EtsErrs;
                 [] -> 0
             end,
+
+            Stats = rcl_bench_histogram:get_histogram_statistics({latencies, Op}),
+            P = proplists:get_value(percentile, Stats),
+
             ets:update_counter(t, Op, {2, -Oks}, {Op, 0}),
             ets:update_counter(rcl_bench_errors, Op, {2, -OpErrors}, {Op, 0}),
             ets:update_counter(rcl_bench_total_errors, Op, {2, OpErrors}, {Op, 0}),
@@ -107,11 +117,17 @@ handle_info(report, State) ->
             %% Write summary
             File = erlang:get({csv_file, Op}),
             file:write(File,
-                io_lib:format("~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w\n",
+                io_lib:format("~w, ~w, ~w, ~w, ~.1f, ~w, ~w, ~w, ~w, ~w, ~w\n",
                     [Elapsed,
                         Window,
                         Oks,
-                        0,0,0,0,0,0,0,
+                        proplists:get_value(min, Stats, 0),
+                        proplists:get_value(arithmetic_mean, Stats, 0),
+                        proplists:get_value(median, Stats, 0),
+                        proplists:get_value(95, P, 0),
+                        proplists:get_value(99, P, 0),
+                        proplists:get_value(999, P, 0),
+                        proplists:get_value(max, Stats, 0),
                         OpErrors])),
             
             %% TODO report total errors
